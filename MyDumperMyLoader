@@ -1,0 +1,54 @@
+Migrating MYSQL - AWS RDS to Azure Flexible Server
+
+When considering a migration path for MySQL, you can consider two paths: Logical or physiscal.
+Logical - Running INSERT commands to re-create the db on the new server
+Physiscal - migrating the actual files of the db and starting the new server using them.
+
+Generally speaking, I would mostly recomment physiscal which is significantly faster, a good implementation of this is xTraBackup by Percona.
+
+However, in this case I was moving from a PaaS service on AWS and could not access the physical files so only the logical restore path remain. 
+There are multiple tools to perform a logical backup-restore that work well on Azure, here are a few of them:
+* MySQLDump - native MySQL tool
+* Azure DMS - Azure data migration service
+* MyDumper/MyLOader - Open source
+
+Comparison between the tools:
+mysqldump vs mudumper/myloader: 
+Backup: both have very simillar capabilities, but the backup with mydumper is slightly easier for a large database because we don't need to manually configure any threshholds for breaking the database in to chinks.
+Restore: Here the difference really comes to light where myloader is significantly faster. You can see some speed comparisons here: https://www.percona.com/blog/backup-restore-performance-conclusion-mysqldump-vs-mysql-shell-utilities-vs-mydumper-vs-mysqlpump-vs-xtrabackup/.
+
+Azure DMS is very easy to manage and you don't need to worry about the VM running behind the scenes as this is a managed service. However, in terms of restore speed, fo large databases DMS is significantly slower. Apparently it is possible to open a support ticket and request a larger VM to run the restore in order to speed up the process, but I didn't attempt that.
+
+Performance tuning: The bottleneck of the operation is the restore process, in order to reach optimal performance it is recommended to consider the following parameters:
+1. Compression - no compression VS GZip vs ZSTD.
+2. Number of threads - restore threads should most of the time be 2X the number of CPU, can can vary depending on your target machine running the MySQL
+3. Restore process - by this I mean what are the restore steps:
+  I) Primary Key - If the primary key is part of the schema when creating the table, each insert statement will cause the organization of the entire table. This will cause a delay proportional to the table size. For very large tables (over 500GB) I would recommend first moving the data and then modifying the schema to add the primary key. This will cause the entire table to copy but will save a significant ammount of time.
+  II) Indexes - If the table contains secondary indexses, like the promary key, every insert statement will cause the indexes to be re-calculated. For medium databases (Over 100GB) it is recomended to first add the data and then add the indexes
+  III) Partitions - .............
+  
+If you are migrating a very large db (like me) the backup process should be:
+1. Backup entire table to local files 
+2. Backup the schema files   
+3. Create the table (without PK and indexes)
+4. Import data only
+5. Modify table to add primary key 
+6. Create index
+7. Create constraints
+
+ 
+ Runtime environemt - unless you are using Azure DMS, you need to make sure you have a VM capable of running the migration service for an extended period of time without interruptions. 
+  - Make sure your process is running as a Demon either using nohup (or simillar) or in a container, so that in case of any momentary network disconnections the entire process won't fail.
+  - VM location - netowrking speed to the source/destination database are critical, any additional round trip time will accumulate in the migration process. I recoment making sure you use a VM as close as possible to both the source and destination. In Azure, you can use a VM with accelerated networking to make sure the network speed is not the bottleneck of the process
+  - DB size considerations - DB sizing is not part of the scope here, but for the migration process it is very likely that the RAM will be the bottleneck, consider creating a "larger" than needed db only for the migration time and then downsizing it once the migration has complete.
+  - VM size considerations - storage optimized VM is the prefered balance with 2X vCores more than the number of threads running.
+  
+Specific parameters to change on the Azure Flexible Server - to help the migration process (https://docs.microsoft.com/en-us/azure/mysql/single-server/how-to-migrate-rds-mysql-workbench#prerequisites):
+  - Character set on source and target db are the same
+  - configure wait timeout
+  - max_allowed_packet = 1073741824
+  - innodb_io_capacity = 9000
+  - innodb_io_capacity_max = 9000
+  
+a
+
